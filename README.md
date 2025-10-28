@@ -14,7 +14,7 @@ A simple and elegant Go library for managing subprocesses with bidirectional I/O
 ## Installation
 
 ```bash
-go get github.com/yourusername/subprocess
+go get github.com/cuongtranba/subprocess
 ```
 
 ## Quick Start
@@ -27,7 +27,7 @@ import (
     "fmt"
     "io"
 
-    "github.com/yourusername/subprocess"
+    "github.com/cuongtranba/subprocess"
 )
 
 func main() {

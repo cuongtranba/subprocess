@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/yourusername/subprocess"
+	"github.com/cuongtranba/subprocess"
 )
 
 func main() {

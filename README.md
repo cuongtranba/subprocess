@@ -5,11 +5,14 @@ A simple and elegant Go library for managing subprocesses with bidirectional I/O
 ## Features
 
 - **Simple API**: Create and manage subprocesses with minimal boilerplate
+- **Pipeline Support**: Shell-like operators (`|`, `&&`, `||`, `&`) for composing processes
+- **Streaming Pipes**: Memory-efficient real-time data flow between processes
 - **Bidirectional I/O**: Read from and write to subprocess stdin/stdout/stderr through a unified interface
 - **Context Support**: Full support for `context.Context` for cancellation and timeouts
 - **Process Control**: Start, stop, and wait for subprocess completion
-- **Combined Output**: Automatically combines stdout and stderr streams
-- **Well Tested**: Comprehensive test suite with 87%+ code coverage
+- **Graceful Shutdown**: Configurable timeouts for clean process termination
+- **Result Trees**: Comprehensive execution traces with all intermediate outputs
+- **Well Tested**: Comprehensive test suite with high code coverage
 
 ## Installation
 
@@ -60,6 +63,190 @@ func main() {
         panic(err)
     }
 }
+```
+
+## Pipeline Support
+
+The library supports shell-like pipeline operations with a fluent API. Pipelines use streaming I/O for memory efficiency and provide comprehensive execution results.
+
+### Quick Pipeline Example
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "strings"
+
+    "github.com/cuongtranba/subprocess"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // Create a pipeline: echo "hello world" | grep "world"
+    echo, _ := subprocess.NewExecutable("echo", "hello world")
+    grep, _ := subprocess.NewExecutable("grep", "world")
+
+    result, err := echo.Pipe(grep).Run(ctx)
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Output: %s\n", strings.TrimSpace(string(result.Stdout)))
+    fmt.Printf("Exit code: %d\n", result.ExitCode)
+}
+```
+
+### Pipeline Operators
+
+#### Pipe (`|`)
+
+Connects stdout of one process to stdin of the next:
+
+```go
+// ls | grep ".go" | wc -l
+ls, _ := subprocess.NewExecutable("ls")
+grep, _ := subprocess.NewExecutable("grep", ".go")
+wc, _ := subprocess.NewExecutable("wc", "-l")
+
+result, _ := ls.Pipe(grep).Pipe(wc).Run(ctx)
+fmt.Printf("Go files: %s\n", result.Stdout)
+```
+
+**Behavior:**
+- Streaming data flow (memory efficient)
+- Fail-fast: if any process fails, entire pipeline fails
+- Final output is from the last process in the chain
+
+#### And (`&&`)
+
+Runs next process only if previous succeeds (exit code 0):
+
+```go
+// make test && make build
+test, _ := subprocess.NewExecutable("make", "test")
+build, _ := subprocess.NewExecutable("make", "build")
+
+result, _ := test.And(build).Run(ctx)
+// build only runs if test succeeds
+```
+
+**Behavior:**
+- Sequential execution
+- Short-circuit: stops on first failure
+- Skipped processes are marked in result tree
+
+#### Or (`||`)
+
+Runs next process only if previous fails (exit code != 0):
+
+```go
+// false || echo "recovered"
+false_cmd, _ := subprocess.NewExecutable("false")
+echo, _ := subprocess.NewExecutable("echo", "recovered")
+
+result, _ := false_cmd.Or(echo).Run(ctx)
+// echo runs because false fails
+// final exit code is 0 (bash behavior)
+```
+
+**Behavior:**
+- Matches bash semantics: `||` recovers from failure
+- If recovery succeeds, overall result is success
+- Original error preserved in result tree
+
+#### Background (`&`)
+
+Runs process in the background:
+
+```go
+// long_task & quick_task
+longTask, _ := subprocess.NewExecutable("sleep", "10")
+quickTask, _ := subprocess.NewExecutable("echo", "done")
+
+result, _ := longTask.Background().And(quickTask).Run(ctx)
+// quickTask runs immediately, longTask runs in parallel
+// Run() waits for both before returning
+```
+
+**Behavior:**
+- Non-blocking: foreground processes continue immediately
+- Wait-at-end: `Run()` waits for all background jobs
+- Errors are collected in `result.BackgroundErrors` (don't affect exit code)
+
+### Complex Pipeline Example
+
+Combine operators for sophisticated workflows:
+
+```go
+// (echo "test" | grep "test") && echo "found" || echo "not found"
+echo, _ := subprocess.NewExecutable("echo", "test")
+grep, _ := subprocess.NewExecutable("grep", "test")
+found, _ := subprocess.NewExecutable("echo", "found")
+notFound, _ := subprocess.NewExecutable("echo", "not found")
+
+pipeline := echo.Pipe(grep).And(found).Or(notFound)
+result, _ := pipeline.Run(ctx)
+
+fmt.Printf("Result: %s\n", result.Stdout) // "found"
+```
+
+### Configuration
+
+#### Shutdown Timeout
+
+Set graceful shutdown timeout (default: 5 seconds):
+
+```go
+process, _ := subprocess.NewExecutable("long_running_task")
+
+result, _ := process.
+    WithShutdownTimeout(10 * time.Second).
+    Run(ctx)
+
+// On context cancellation:
+// 1. Send SIGTERM
+// 2. Wait up to 10 seconds
+// 3. Send SIGKILL if still running
+```
+
+### Result Structure
+
+Pipeline results use a tree structure to capture all execution details:
+
+```go
+type Result struct {
+    Type      OperationType  // Single, Pipe, And, Or, Background
+    Stdout    []byte         // Captured stdout
+    Stderr    []byte         // Captured stderr
+    ExitCode  int            // Exit code
+    Error     error          // Execution error if any
+    Skipped   bool           // True if skipped (in && || chains)
+    Children  []*Result      // Child results (nested operations)
+
+    BackgroundErrors []error // Errors from background processes
+}
+```
+
+Example result tree inspection:
+
+```go
+result, _ := echo.Pipe(grep).And(found).Run(ctx)
+
+fmt.Printf("Type: %v\n", result.Type)           // "and"
+fmt.Printf("Exit code: %d\n", result.ExitCode)  // 0
+fmt.Printf("Children: %d\n", len(result.Children)) // 2
+
+// First child is the pipe operation
+pipeResult := result.Children[0]
+fmt.Printf("Pipe type: %v\n", pipeResult.Type)  // "pipe"
+fmt.Printf("Pipe children: %d\n", len(pipeResult.Children)) // 2 (echo and grep)
+
+// Second child is the "found" command
+foundResult := result.Children[1]
+fmt.Printf("Found output: %s\n", foundResult.Stdout) // "found"
 ```
 
 ## API Reference
@@ -230,15 +417,22 @@ go tool cover -html=coverage.out
 
 The test suite includes:
 - ✅ Process creation and execution
+- ✅ Pipeline operators (Pipe, And, Or, Background)
+- ✅ Streaming pipe connections
+- ✅ Multi-stage pipelines
+- ✅ Conditional execution and short-circuiting
+- ✅ Fail-fast behavior
+- ✅ Result tree structure
 - ✅ Bidirectional I/O communication
 - ✅ Process termination and cleanup
 - ✅ Error handling and validation
 - ✅ Context cancellation
+- ✅ Graceful shutdown with timeout
 - ✅ Stderr capture
 - ✅ Multiple writes to stdin
 - ✅ Concurrent operations
 
-**Coverage**: 87%+ statement coverage. The uncovered lines are error handling for system-level pipe creation failures (StdinPipe, StdoutPipe, StderrPipe errors), which are extremely rare and difficult to test without mocking system calls.
+**Coverage**: Comprehensive test coverage including edge cases and error scenarios.
 
 ## Design Principles
 
@@ -250,10 +444,13 @@ The test suite includes:
 ## Use Cases
 
 - Building CLI tools that wrap other commands
+- Creating complex command pipelines (like shell scripts in Go)
+- Process orchestration and workflow automation
 - Executing and interacting with shell scripts
-- Process orchestration and management
 - Interactive command-line applications
 - Command output processing and filtering
+- Parallel task execution with background processes
+- Conditional command execution with error recovery
 
 ## Requirements
 
